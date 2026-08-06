@@ -21,7 +21,7 @@ This project instead estimates the **causal treatment effect** of the coupon upg
 
 ---
 
-## Key Highlights
+## Key Concepts
 
 - **🎯 Individual-level targeting** — every customer gets a personalized recommendation on whether to upgrade their coupon.
 - **📈 Treatment Effect Estimation (Uplift Modeling)** — a **T-learner** trains separate models on treated vs. control groups to isolate the causal effect of the coupon, rather than mere correlation.
