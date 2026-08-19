@@ -1,192 +1,233 @@
-# Causal ML for Coupon Targeting 🎯
+# Causal ML for Coupon Targeting
 
-An interactive Streamlit dashboard that answers a real business question with **causal inference**, not just prediction:
+An end-to-end causal machine-learning system for deciding which customers should receive a **1-day coupon instead of a 2-hour coupon**, based on the estimated incremental change in purchase probability—not merely the customer's baseline likelihood of purchasing.
 
-> **Which customers should receive the better coupon (1-day redemption) instead of the weaker one (2-hour redemption) — based on how much it actually changes their behavior?**
+The project combines held-out uplift estimation, propensity-score matching, doubly robust estimation, uncertainty quantification, covariate-balance diagnostics and business-value optimization in an interactive Streamlit dashboard.
 
-Every causal estimate and targeting number in the dashboard is computed on a **held-out evaluation split** — never on the rows the models were trained on.
+> **Important:** This is an observational causal analysis. The estimates rely on consistency, positivity and conditional exchangeability given the measured confounders. Agreement among estimators strengthens confidence but does not prove that all confounding has been removed.
 
-Built on the [UCI In-Vehicle Coupon Recommendation dataset](https://archive.ics.uci.edu/ml/machine-learning-databases/00603/in-vehicle-coupon-recommendation.csv).
+## Why causal targeting?
 
----
+A standard prediction model answers:
 
-## Why This Isn't Just "Predict Who Buys"
+> Who is likely to purchase?
 
-A standard ML model answers *"who is likely to purchase?"* — and ranks already-loyal customers highest, even if a coupon wouldn't change their behavior at all. That wastes marketing spend on people who would have bought anyway.
+That can waste campaign budget on customers who would purchase even without the stronger offer. This project instead asks:
 
-This project instead estimates the **causal treatment effect** of the coupon upgrade: *"how much MORE likely does the better coupon make this specific customer to buy?"* — and reports that estimate the way a rigorous analysis should: cross-checked by three independent estimators, with confidence intervals, and validated for common causal-inference failure modes (positivity, overlap, treatment-arm balance).
+> For which customers does upgrading the coupon from 2 hours to 1 day increase purchase probability enough to justify its cost?
 
-| Approach | Question it answers | Business use |
+| Approach | Estimated quantity | Business use |
 |---|---|---|
-| Baseline model | "Will this customer buy?" | ❌ Misleading for targeting |
-| Uplift / causal model | "How much does the coupon *change* their behavior?" | ✅ Correct basis for targeting |
+| Purchase prediction | \(P(Y=1\mid X)\) | Identifies likely buyers |
+| Causal uplift modeling | \(P(Y=1\mid T=1,X)-P(Y=1\mid T=0,X)\) | Identifies customers whose behavior may change because of treatment |
 
----
+## Main features
 
-## Key Concepts
+- **Train-only feature encoding:** raw rows are split before categorical encoding. The `OneHotEncoder(handle_unknown="ignore")` learns its schema only from training rows and applies the same schema to held-out evaluation rows.
+- **T-learner uplift modeling:** separate Random Forest outcome models estimate purchase probability under the 1-day and 2-hour coupon conditions.
+- **Propensity-score matching:** logistic-regression propensity scores are matched using nearest-neighbor matching with a caliper of 0.20 standard deviations of the logit propensity score.
+- **Balance diagnostics:** standardized mean differences are reported before and after matching, together with match rate, unmatched treated observations and maximum residual imbalance.
+- **Doubly robust AIPW:** combines propensity and outcome models so the ATE remains consistent if either nuisance-model family is correctly specified, under the required causal assumptions.
+- **Held-out evaluation:** nuisance models are fitted on the 75% training partition; estimates, ranking and targeting outputs are evaluated on the remaining 25%.
+- **Bootstrap confidence intervals:** seeded, treatment-arm-stratified bootstrap resampling provides 95% intervals for the T-learner, PSM ATT and AIPW ATE.
+- **Overlap diagnostics:** treatment balance, propensity-score clipping and coupon-expiration concentration checks flag weak counterfactual support.
+- **Business optimization:** converts uplift into expected incremental revenue, net value, campaign cost and ROI under value-threshold and budget-cap strategies.
+- **Interactive analysis:** Streamlit views cover diagnostics, uplift distributions, cumulative gain, subgroup uplift, customer ranking, CSV export and individual what-if analysis.
 
-- **🎯 Individual-level targeting** — every held-out customer gets a personalized recommendation on whether to upgrade their coupon.
-- **📈 Treatment Effect Estimation (Uplift Modeling)** — a **T-learner** trains separate Random Forests on treated vs. control groups, fit only on the training split, to isolate the causal effect of the coupon rather than mere correlation.
-- **🔬 Two independent cross-checks** —
-  - **Propensity Score Matching (PSM/ATT)**: a logistic-regression propensity model + nearest-neighbor matching, evaluated on the held-out split.
-  - **Doubly-robust AIPW (Augmented Inverse Propensity Weighting)**: combines the outcome models and the propensity model so the estimate stays consistent even if one of the two is misspecified.
-- **📏 Uncertainty quantification** — seeded, arm-stratified bootstrap resampling produces 95% confidence intervals for all three estimators, instead of reporting bare point estimates.
-- **🧪 Positivity & overlap diagnostics** — within-coupon expiration proportions, an explicit flag for any coupon type exceeding 90% concentration in one treatment arm, treatment-arm balance (% control vs. % treated), and a count of propensity scores that hit the 0.01/0.99 clipping bounds (i.e., customers with weak counterfactual support).
-- **💰 Business optimization layer** — converts uplift into **Expected Incremental Revenue** and **Net Value**, with two selectable targeting rules:
-  - **Value threshold** — recommend whenever expected incremental revenue exceeds the coupon cost.
-  - **Budget cap** — rank customers by net value and target as many as a fixed campaign budget allows.
-- **📊 Portfolio-level ROI** — aggregates individual decisions into total customers targeted, total incremental revenue, total cost, and overall **campaign ROI**.
-- **📉 Qini-style gain curve** — an inverse-propensity-weighted cumulative gain curve comparing model-ranked targeting against random targeting.
-- **🗂️ Subgroup uplift** — average estimated uplift broken out by coupon type, to see where the causal effect is strongest.
-- **🖥️ Interactive dashboard** — filter by coupon type, destination, and income; explore top-uplift customers; adjust business assumptions (purchase value, coupon cost, targeting rule, budget) live; and run "what-if" simulations on individual customers' age/income.
-- **🧱 Inference-safe encoding** — training-fitted `OneHotEncoder(handle_unknown="ignore")` fit only on training data, so unseen categories at evaluation/inference time are handled explicitly instead of silently breaking column alignment.
+## Causal setup
 
----
-
-## Results (Held-Out Evaluation Set)
-
-The figures below come from a real run of the dashboard (`localhost:8501`) on the full cleaned dataset, with a 75/25 train/held-out split, default business assumptions ($15 avg. purchase value, $2 coupon cost), and the **Value threshold** targeting rule with no sidebar filters applied. A full screenshot walkthrough is included in the repo as [`Causal_Coupon_Targeting.pdf`](./Causal_Coupon_Targeting.pdf).
-
-**Portfolio summary** — 3,153 held-out customers:
-
-| Metric | Value |
+| Component | Definition |
 |---|---|
-| Customers to target | **1,790** |
-| Incremental revenue | **$5,382** |
-| Campaign cost | **$3,580** |
-| Campaign ROI | **50.3%** |
+| Treatment \(T=1\) | 1-day coupon expiration |
+| Control \(T=0\) | 2-hour coupon expiration |
+| Outcome \(Y\) | Coupon accepted/redeemed |
+| Covariates \(X\) | Customer characteristics, context, coupon type and behavioral-frequency variables measured before the outcome |
+| Individual score | T-learner conditional uplift estimate |
+| Population estimands | Plug-in average uplift, PSM ATT and AIPW ATE |
 
-**Held-out causal estimates** (three independent estimators, all evaluated on the same held-out split):
+## Leakage-safe data flow
 
-| Estimator | Point estimate | 95% CI (stratified bootstrap) |
-|---|---|---|
-| T-learner average uplift | **+0.149** | [+0.129, +0.159] |
-| Propensity matching ATT | **+0.159** | [+0.102, +0.233] |
-| Doubly-robust AIPW ATE | **+0.168** | [+0.131, +0.199] |
-
-All three intervals sit clearly above zero and overlap with each other — reassuring, but agreement across estimators sharing the same confounder set and ignorability assumption does not by itself prove all confounding has been removed.
-
-**Positivity, overlap, and treatment-balance checks:**
-
-| Check | Result |
-|---|---|
-| Control share (2h coupon) | 44.2% |
-| Treated share (1d coupon) | 55.8% |
-| Propensities clipped at 0.01/0.99 | 0 (0.0%) |
-| Coupon types exceeding 90% concentration in one expiration arm | None flagged |
-
-No coupon type is a near-deterministic predictor of the treatment, treatment arms are reasonably balanced, and no held-out customer needed propensity clipping — together, mild evidence against a severe positivity violation.
-
-**Held-out average uplift by coupon type** (highest to lowest): Restaurant(&lt;20) → Restaurant(20-50) → Carry out & Take away → Coffee House — the model finds the coupon upgrade matters most for the cheaper, more impulse-driven restaurant coupons.
-
----
-
-## Why the Numbers Differ From an Earlier In-Sample Version
-
-If you've seen an earlier version of this project reporting +0.143 / +0.139 with no confidence intervals: those numbers came from an **in-sample** implementation (trained and evaluated on the same rows, no held-out split, no bootstrap CIs, no overlap check). The current pipeline fits every nuisance model on a training partition only and reports all causal estimates, targeting decisions, and diagnostics on a genuinely held-out partition — so the numbers above are not directly comparable to that earlier version, and are the ones to cite going forward.
-
----
-
-## Statistics + Decision Science + ML — How It Fits Together
-
-```
-Raw survey data
-      │
-      ▼
-┌─────────────────────┐   Clean, encode (persisted OneHotEncoder),
-│  data_prep.py         │   split into confounders (X), treatment (T), outcome (Y)
-└─────────────────────┘
-      │
-      ▼
-┌─────────────────────────────┐
-│  causal_train_test_split     │   Joint treatment/outcome-stratified 75/25 split
-└─────────────────────────────┘
-      │
-      ├────────────────────────────┬──────────────────────────────┐
-      ▼                            ▼                              ▼
-┌─────────────────────┐  ┌──────────────────────┐   ┌──────────────────────────┐
-│  Baseline model       │  │  T-learner            │   │  Propensity model         │
-│  "Who buys?"          │  │  (Causal Inference)    │   │  Logistic Regression      │
-│  Logistic Regression  │  │  Two Random Forests:  │   │  P(T=1 | X)               │
-│  (train, held-out AUC)│  │  P(buy|treated) vs.   │   └──────────────────────────┘
-└─────────────────────┘  │  P(buy|control)       │              │
-                          └──────────────────────┘              │
-                                     │                           │
-                                     ▼                           ▼
-                          ┌───────────────────────┐   ┌──────────────────────────┐
-                          │ Uplift = P(treated) −  │   │ PSM ATT (matching) +      │
-                          │          P(control)    │   │ Doubly-robust AIPW ATE    │
-                          └───────────────────────┘   └──────────────────────────┘
-                                     │                           │
-                                     └─────────────┬─────────────┘
-                                                    ▼
-                                   ┌─────────────────────────────────┐
-                                   │  Stratified bootstrap → 95% CIs   │
-                                   │  Positivity/overlap/balance checks│
-                                   └─────────────────────────────────┘
-                                                    │
-                                                    ▼
-                                   ┌─────────────────────────────────┐
-                                   │  Business decision layer          │
-                                   │  Incremental revenue, net value,  │
-                                   │  Value-threshold or Budget-cap     │
-                                   │  targeting, portfolio ROI          │
-                                   └─────────────────────────────────┘
+```text
+Raw UCI survey data
+        |
+        v
+Clean rows and map treatment/outcome
+        |
+        v
+Joint T/Y-stratified 75/25 split on raw rows
+        |
+        +---------------------------+
+        |                           |
+        v                           v
+Training raw rows              Held-out raw rows
+        |                           |
+Fit encoder on training only        |
+        |                           |
+        +------ same encoder -------+
+                    |
+                    v
+        Aligned train/evaluation features
+                    |
+                    v
+    Fit outcome and propensity models on train
+                    |
+                    v
+   Estimate effects and targeting value on holdout
 ```
 
----
+Unknown evaluation categories are ignored without changing the number or order of model inputs. The encoder is retained in the fitted in-memory analysis bundle. For an external deployment, save the encoder together with the trained models using `joblib`.
 
-## Project Structure
+## Methods
 
-```
+### 1. T-learner
+
+Two Random Forest classifiers are trained independently:
+
+\[
+\hat\mu_1(x)=\hat P(Y=1\mid T=1,X=x), \qquad
+\hat\mu_0(x)=\hat P(Y=1\mid T=0,X=x)
+\]
+
+The estimated uplift is:
+
+\[
+\hat\tau(x)=\hat\mu_1(x)-\hat\mu_0(x)
+\]
+
+### 2. Propensity-score matching ATT
+
+A logistic-regression model estimates:
+
+\[
+\hat e(x)=P(T=1\mid X=x)
+\]
+
+Treated observations are matched to their nearest controls using logit propensity scores. A match is accepted only when its distance is within:
+
+\[
+0.20\times SD(\operatorname{logit}(\hat e(X)))
+\]
+
+The dashboard reports:
+
+- number and percentage of treated observations matched;
+- unmatched treated observations;
+- mean and maximum match distance;
+- mean and maximum absolute SMD before and after matching;
+- number of covariates with \(|SMD|>0.10\) after matching;
+- a feature-level balance table.
+
+### 3. Doubly robust AIPW
+
+The AIPW score combines outcome regression and inverse propensity weighting:
+
+\[
+\hat\tau_{AIPW}=\frac{1}{n}\sum_i\left[
+\frac{T_i(Y_i-\hat\mu_1(X_i))}{\hat e(X_i)}-
+\frac{(1-T_i)(Y_i-\hat\mu_0(X_i))}{1-\hat e(X_i)}+
+\hat\mu_1(X_i)-\hat\mu_0(X_i)
+\right]
+\]
+
+Propensity scores are clipped to `[0.01, 0.99]` for numerical stability, and the number of clipped observations is displayed.
+
+### 4. Uncertainty quantification
+
+The pipeline uses seeded, treatment-arm-stratified bootstrap samples. In every iteration it resamples the training and evaluation partitions, refits the nuisance models and recomputes all three causal estimators.
+
+## Results
+
+The following results were recorded from the updated held-out pipeline after introducing train-only encoding, 0.20-SD caliper matching and post-match balance diagnostics. The dashboard was run with no customer filters, a `$15` average purchase value, a `$2` incremental coupon cost and the value-threshold targeting rule.
+
+### Held-out causal estimates
+
+| Estimator | Point estimate | 95% bootstrap CI |
+|---|---:|---:|
+| T-learner average uplift | **+0.148** | **[+0.129, +0.159]** |
+| Caliper-matched PSM ATT | **+0.194** | **[+0.117, +0.230]** |
+| Doubly robust AIPW ATE | **+0.169** | **[+0.131, +0.199]** |
+
+### Matching quality
+
+The dashboard calculates matching quality directly from the held-out evaluation partition and displays:
+
+- treated observations matched and unmatched;
+- match rate under the 0.20-SD logit-propensity caliper;
+- maximum absolute SMD before and after matching;
+- number of encoded covariates with \(|SMD|>0.10\) after matching;
+- a feature-level balance table sorted by residual imbalance.
+
+These diagnostics are intentionally generated from the current run rather than copied as permanent constants, so balance can be rechecked whenever the split, covariates or matching specification changes.
+
+### Business result
+
+Using an average purchase value of `$15`, an incremental coupon cost of `$2` and the value-threshold targeting strategy:
+
+| Metric | Result |
+|---|---:|
+| Held-out customers | **3,153** |
+| Customers targeted | **1,832** |
+| Expected incremental revenue | **$5,433** |
+| Campaign cost | **$3,664** |
+| Estimated campaign ROI | **48.3%** |
+
+These are model-based decision estimates, not realized revenue from a randomized production campaign.
+
+## Business decision rules
+
+For each held-out customer:
+
+\[
+\text{Expected incremental revenue}=\hat\tau(x)\times\text{purchase value}
+\]
+
+\[
+\text{Net value}=\text{expected incremental revenue}-\text{coupon cost}
+\]
+
+- **Value threshold:** target customers with positive estimated net value.
+- **Budget cap:** rank profitable customers by net value and select as many as the budget permits.
+
+## Project structure
+
+```text
 .
-├── app.py                                    # Streamlit dashboard (Overview & Diagnostics, Top Customers, Customer Lookup)
-├── backend.py                                 # Orchestration layer: holdout prep, results building, filtering, targeting
-├── causal_model.py                            # T-learner, PSM/ATT, AIPW, bootstrap CIs, overlap & balance diagnostics, Qini, business rules
-├── data_prep.py                               # Data loading, cleaning, and OneHotEncoder-based feature engineering (X, T, Y)
-├── requirements.txt                           # Python dependencies (pinned)
-├── EDA.ipynb                                  # Exploratory data analysis notebook
-├── in-vehicle-coupon-recommendation.csv        # Local backup of the UCI dataset (used if the remote URL is unreachable)
-├── Causal_Coupon_Targeting.pdf                 # Screenshot walkthrough of the live dashboard and results
-└── README.md
+├── app.py
+├── backend.py
+├── causal_model.py
+├── data_prep.py
+├── EDA.ipynb
+├── requirements.txt
+├── in-vehicle-coupon-recommendation.csv
+└── Causal Coupon Targeting1.pdf
 ```
 
-## Methodology
-
-1. **Data Prep** (`data_prep.py`) — loads the UCI dataset (falling back to the local `in-vehicle-coupon-recommendation.csv` if the remote URL is unreachable), cleans missing/duplicate rows, ordinal-encodes age/income/visit-frequency fields, and one-hot encodes nominal features via a persisted `OneHotEncoder(handle_unknown="ignore")` so the schema is inference-safe against unseen categories. Defines:
-   - **X** — customer/context confounders
-   - **T** — treatment indicator (`1` = 1-day coupon, `0` = 2-hour coupon)
-   - **Y** — outcome (coupon redeemed / purchase made)
-
-2. **Causal Modeling** (`causal_model.py`)
-   - `causal_train_test_split` — a joint treatment/outcome-stratified 75/25 split, so every downstream estimate is computed on genuinely held-out rows.
-   - `train_baseline_model` — logistic regression predicting purchase, ignoring treatment, evaluated on held-out AUC (the "naive" comparison).
-   - `train_uplift_model` / `predict_uplift` — T-learner: two Random Forests fit only on the training partition's treated and control rows; uplift = difference in predicted purchase probability on held-out rows.
-   - `fit_propensity_model` / `propensity_score_ate` — logistic regression propensity model + nearest-neighbor matching, returning both the ATT estimate and propensity diagnostics (clipping counts, min/max scores).
-   - `aipw_ate` — doubly-robust AIPW estimator combining the T-learner outcome models and the propensity model.
-   - `bootstrap_causal_estimates` / `bootstrap_ate_T` / `bootstrap_ate_ps` — seeded, treatment-arm-stratified bootstrap resampling for 95% confidence intervals on all three estimators.
-   - `coupon_expiration_overlap` / `treatment_balance` — positivity/overlap diagnostics and treatment-arm balance checks.
-   - `qini_curve` / `subgroup_uplift` — IPW-weighted cumulative gain curve and per-coupon-type average uplift.
-   - `business_recommendation` / `portfolio_summary` — turn uplift into dollar-denominated incremental revenue, net value, and aggregate ROI, under either a value-threshold or a fixed-budget targeting rule.
-
-3. **Backend** (`backend.py`) — orchestrates data loading, holdout preparation, results-table construction, sidebar filtering, and targeting so `app.py` only handles UI state and rendering.
-
-4. **Dashboard** (`app.py`)
-   - **Overview & Diagnostics** — portfolio KPIs, all three held-out causal estimates with bootstrap CIs, positivity/overlap/balance checks, the uplift distribution, the Qini-style gain curve, and per-coupon-type subgroup uplift.
-   - **Top Customers** — ranks and visualizes held-out customers by estimated uplift; exports the recommended list as CSV.
-   - **Customer Lookup** — inspect any held-out customer's probabilities and recommendation, plus a live what-if slider to see how age/income shift their estimated uplift.
-
-## Getting Started
+## Running the project
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Tech Stack
+The application downloads the UCI dataset and falls back to the included CSV when remote access is unavailable.
 
-`Python` · `pandas` / `numpy` · `scikit-learn` (Logistic Regression, Random Forest, OneHotEncoder, Nearest Neighbors) · `Streamlit` · `Plotly`
+## Limitations
 
----
+- The treatment was not assigned by this project; causal interpretation depends on no important unmeasured confounding after conditioning on the included covariates.
+- Matching balance reduces observed imbalance but cannot establish balance on unobserved variables.
+- The T-learner's customer-level effects are heterogeneous model estimates, not directly observed individual causal effects.
+- The what-if controls can create combinations with limited empirical support and should be interpreted as model sensitivity, not guaranteed intervention outcomes.
+- The ROI calculation depends on user-specified purchase-value and coupon-cost assumptions.
+- A randomized controlled campaign or prospective A/B test would provide stronger validation.
 
-*This project demonstrates an end-to-end causal ML workflow — from raw data to held-out, uncertainty-quantified, diagnostic-checked, business-optimized targeting decisions — packaged as a deployable interactive dashboard.*
+## Technology
+
+`Python` · `pandas` · `NumPy` · `scikit-learn` · `Streamlit` · `Plotly`
+
+## Suggested next steps
+
+- Persist the encoder, outcome models and propensity model for external inference.
+- Add automated tests for split isolation, feature alignment, caliper matching and business rules.
+- Add sensitivity analysis for unmeasured confounding.
+- Compare against an S-learner or causal forest using the same held-out protocol.
+- Validate targeting policy value in a randomized experiment.
