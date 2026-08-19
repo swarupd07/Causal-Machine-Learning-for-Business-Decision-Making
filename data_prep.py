@@ -133,25 +133,27 @@ def transform_causal_features(df, encoder):
     )
     return pd.concat([base, encoded_df], axis=1).astype(float)
 
+def fit_feature_encoder(df_train):
+    encoder = make_encoder()
+    encoder.fit(df_train[NOMINAL_COLS])
+    return encoder
 
-def prepare_causal_data(df, encoder=None):
+
+def prepare_causal_data(df):
+    
     df = df.copy()
+
+    # Remove rows with unmapped ordinal values before splitting
     base = _base_features(df)
     valid_index = base.dropna().index
-    df_valid = df.loc[valid_index]
+    df_clean = df.loc[valid_index].reset_index(drop=True)
 
-    if encoder is None:
-        encoder = make_encoder()
-        encoder.fit(df_valid[NOMINAL_COLS])
-    X = transform_causal_features(df_valid, encoder)
-    aligned_index = X.index
+    T = (df_clean["expiration"] == "1d").astype(int)
+    Y = df_clean["Y"].astype(int)
 
-    T = (df.loc[aligned_index, "expiration"] == "1d").astype(int).reset_index(drop=True)
-    Y = df.loc[aligned_index, "Y"].astype(int).reset_index(drop=True)
-    df_clean = df.loc[aligned_index].reset_index(drop=True)
-    X = X.reset_index(drop=True)
-    return df_clean, X, T, Y, encoder
+    return df_clean, T, Y
 
 
 def load_and_prepare():
-    return prepare_causal_data(clean_data(load_data()))
+    df = clean_data(load_data())
+    return prepare_causal_data(df)
