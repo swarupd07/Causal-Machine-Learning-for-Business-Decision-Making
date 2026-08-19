@@ -177,7 +177,7 @@ with tab_overview:
     )
 
     with st.expander("Positivity, overlap, and treatment-balance checks", expanded=True):
-        balance = treatment_balance(T)
+        balance = reatment_balance(bundle["T_eval"])
         b1, b2, b3 = st.columns(3)
         b1.metric("Control share (2h)", f"{balance['control_share']:.1%}")
         b2.metric("Treated share (1d)", f"{balance['treated_share']:.1%}")
@@ -187,7 +187,7 @@ with tab_overview:
             f"({diagnostics['propensity']['fraction_clipped']:.1%})",
         )
 
-        overlap_table, overlap_flags = coupon_expiration_overlap(df_clean)
+        overlap_table, overlap_flags = coupon_expiration_overlap(bundle["df_eval"])
         flagged = overlap_flags[overlap_flags["flag_over_90pct"]]
         if len(flagged):
             names = ", ".join(flagged["coupon"].astype(str))
