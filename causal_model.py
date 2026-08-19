@@ -14,13 +14,17 @@ from sklearn.neighbors import NearestNeighbors
 PROPENSITY_CLIP = (0.01, 0.99)
 
 
-def causal_train_test_split(X, T, Y, test_size=0.25, seed=42):
-    # Spliting data into train/evaluation sets and also preserving treatment outcome proportions.
+def causal_train_test_split(T, Y, test_size=0.25, seed=42):
     joint = pd.Series(T).astype(str) + "_" + pd.Series(Y).astype(str)
     indices = np.arange(len(Y))
+
     train_idx, eval_idx = train_test_split(
-        indices, test_size=test_size, random_state=seed, stratify=joint
+        indices,
+        test_size=test_size,
+        random_state=seed,
+        stratify=joint,
     )
+
     return np.sort(train_idx), np.sort(eval_idx)
 
 
@@ -92,28 +96,160 @@ def propensity_diagnostics(propensity_model, X, clip=PROPENSITY_CLIP):
     }
 
 
-def propensity_score_ate(X, T, Y, propensity_model=None, clip=PROPENSITY_CLIP, return_diagnostics=False):
-    # Estimating ATT by nearest-neighbour propensity-score matching.
+def standardized_mean_differences(X_treated, X_control):
+    """
+    Calculate feature-level standardized mean differences.
+    Absolute SMD below 0.10 is commonly treated as acceptable balance.
+    """
+    treated_mean = X_treated.mean(axis=0)
+    control_mean = X_control.mean(axis=0)
+
+    treated_var = X_treated.var(axis=0, ddof=1)
+    control_var = X_control.var(axis=0, ddof=1)
+
+    pooled_sd = np.sqrt((treated_var + control_var) / 2)
+    pooled_sd = pooled_sd.replace(0, np.nan)
+
+    smd = (treated_mean - control_mean) / pooled_sd
+    return smd.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+def propensity_score_ate(
+    X,
+    T,
+    Y,
+    propensity_model=None,
+    clip=PROPENSITY_CLIP,
+    caliper=0.20,
+    return_diagnostics=False,
+):
+    """
+    Estimate ATT using nearest-neighbour propensity-score matching.
+
+    The caliper is 0.20 standard deviations of the logit propensity
+    score. Treated observations without an acceptable match are removed.
+    """
     if propensity_model is None:
         propensity_model = fit_propensity_model(X, T)
-    diagnostics = propensity_diagnostics(propensity_model, X, clip=clip)
-    ps = np.clip(diagnostics["raw_scores"], *clip).reshape(-1, 1)
+
+    diagnostics = propensity_diagnostics(
+        propensity_model, X, clip=clip
+    )
+
+    raw_ps = diagnostics["raw_scores"]
+    ps = np.clip(raw_ps, *clip)
+    logit_ps = np.log(ps / (1.0 - ps))
+
     T_array = np.asarray(T)
     Y_array = np.asarray(Y)
 
-    treated_ps, control_ps = ps[T_array == 1], ps[T_array == 0]
-    treated_y, control_y = Y_array[T_array == 1], Y_array[T_array == 0]
-    if len(treated_ps) == 0 or len(control_ps) == 0:
-        raise ValueError("PSM requires treated and control rows in the evaluation set.")
+    treated_idx = np.flatnonzero(T_array == 1)
+    control_idx = np.flatnonzero(T_array == 0)
 
-    nearest = NearestNeighbors(n_neighbors=1).fit(control_ps)
-    _, match_idx = nearest.kneighbors(treated_ps)
-    estimate = float(np.mean(treated_y - control_y[match_idx.ravel()]))
+    if len(treated_idx) == 0 or len(control_idx) == 0:
+        raise ValueError(
+            "PSM requires treated and control observations."
+        )
+
+    treated_logit = logit_ps[treated_idx].reshape(-1, 1)
+    control_logit = logit_ps[control_idx].reshape(-1, 1)
+
+    matcher = NearestNeighbors(n_neighbors=1)
+    matcher.fit(control_logit)
+
+    distances, local_match_idx = matcher.kneighbors(treated_logit)
+    distances = distances.ravel()
+
+    matched_control_idx = control_idx[
+        local_match_idx.ravel()
+    ]
+
+    # Standard 0.2 SD caliper on the logit propensity score
+    caliper_width = float(
+        caliper * np.std(logit_ps, ddof=1)
+    )
+
+    accepted = distances <= caliper_width
+
+    matched_treated_idx = treated_idx[accepted]
+    matched_control_idx = matched_control_idx[accepted]
+    accepted_distances = distances[accepted]
+
+    if len(matched_treated_idx) == 0:
+        raise ValueError(
+            "No treated observations remained after caliper matching."
+        )
+
+    estimate = float(
+        np.mean(
+            Y_array[matched_treated_idx]
+            - Y_array[matched_control_idx]
+        )
+    )
+
+    # Balance before matching
+    smd_before = standardized_mean_differences(
+        X.iloc[treated_idx],
+        X.iloc[control_idx],
+    )
+
+    # Balance after matching
+    smd_after = standardized_mean_differences(
+        X.iloc[matched_treated_idx],
+        X.iloc[matched_control_idx],
+    )
+
+    balance_table = pd.DataFrame({
+        "feature": X.columns,
+        "smd_before": smd_before.reindex(X.columns).to_numpy(),
+        "smd_after": smd_after.reindex(X.columns).to_numpy(),
+    })
+
+    balance_table["abs_smd_before"] = (
+        balance_table["smd_before"].abs()
+    )
+    balance_table["abs_smd_after"] = (
+        balance_table["smd_after"].abs()
+    )
+
+    diagnostics.update({
+        "caliper_multiplier": float(caliper),
+        "caliper_width_logit": caliper_width,
+        "n_treated": int(len(treated_idx)),
+        "n_matched": int(len(matched_treated_idx)),
+        "n_unmatched": int((~accepted).sum()),
+        "match_rate": float(accepted.mean()),
+        "mean_match_distance": float(
+            accepted_distances.mean()
+        ),
+        "max_match_distance": float(
+            accepted_distances.max()
+        ),
+        "mean_abs_smd_before": float(
+            balance_table["abs_smd_before"].mean()
+        ),
+        "mean_abs_smd_after": float(
+            balance_table["abs_smd_after"].mean()
+        ),
+        "max_abs_smd_before": float(
+            balance_table["abs_smd_before"].max()
+        ),
+        "max_abs_smd_after": float(
+            balance_table["abs_smd_after"].max()
+        ),
+        "imbalanced_features_before": int(
+            (balance_table["abs_smd_before"] > 0.10).sum()
+        ),
+        "imbalanced_features_after": int(
+            (balance_table["abs_smd_after"] > 0.10).sum()
+        ),
+        "balance_table": balance_table,
+    })
+
     if return_diagnostics:
-        clean_diagnostics = {
-            key: value for key, value in diagnostics.items() if key != "raw_scores"
-        }
-        return estimate, clean_diagnostics
+        diagnostics.pop("raw_scores", None)
+        return estimate, diagnostics
+
     return estimate
 
 
@@ -201,7 +337,7 @@ def bootstrap_causal_estimates(X_train, T_train, Y_train, X_eval, T_eval, Y_eval
 
 
 def _bootstrap_wrapper(X, T, Y, estimator_name, n_boot=100, seed=42):
-    train_idx, eval_idx = causal_train_test_split(X, T, Y, seed=seed)
+    train_idx, eval_idx = causal_train_test_split(T, Y, seed=seed)
     result = bootstrap_causal_estimates(
         X.iloc[train_idx],
         pd.Series(T).iloc[train_idx],
