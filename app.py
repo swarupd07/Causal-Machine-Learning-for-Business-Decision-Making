@@ -1,4 +1,4 @@
-"""Streamlit dashboard for held-out causal coupon targeting."""
+# Streamlit dashboard for held-out causal coupon targeting.
 
 import pandas as pd
 import plotly.express as px
@@ -39,8 +39,10 @@ def load_cached_data():
 
 
 @st.cache_resource
-def fit_cached_holdout(df_clean, X, T, Y):
-    return prepare_holdout(df_clean, X, T, Y, test_size=0.25, seed=42)
+def fit_cached_holdout(df_clean, T, Y):
+    return prepare_holdout(
+        df_clean, T, Y, test_size=0.25, seed=42
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -58,8 +60,8 @@ def get_cached_bootstrap_cis(X_train, T_train, Y_train, X_eval, T_eval, Y_eval):
     )
 
 
-df_clean, X, T, Y, feature_encoder = load_cached_data()
-bundle = fit_cached_holdout(df_clean, X, T, Y)
+df_clean, T, Y = load_cached_data()
+bundle = fit_cached_holdout(df_clean, T, Y)
 diagnostics = get_causal_diagnostics(bundle)
 
 with st.spinner("Computing cached, stratified bootstrap confidence intervals..."):
@@ -218,6 +220,65 @@ with tab_overview:
         )
         fig_overlap.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_overlap, use_container_width=True)
+
+        st.markdown("#### Propensity-score matching quality")
+
+        psm_diag = diagnostics["propensity"]
+
+        p1, p2, p3, p4 = st.columns(4)
+
+        p1.metric(
+            "PSM match rate",
+            f"{psm_diag['match_rate']:.1%}",
+        )
+
+        p2.metric(
+            "Treated unmatched",
+            f"{psm_diag['n_unmatched']:,}",
+        )
+
+        p3.metric(
+            "Max |SMD| before",
+            f"{psm_diag['max_abs_smd_before']:.3f}",
+        )
+
+        p4.metric(
+            "Max |SMD| after",
+            f"{psm_diag['max_abs_smd_after']:.3f}",
+        )
+
+        st.caption(
+            f"Caliper: 0.20 SD of logit propensity score "
+            f"(width={psm_diag['caliper_width_logit']:.3f})."
+        )
+
+        if psm_diag["max_abs_smd_after"] > 0.10:
+            st.warning(
+                f"{psm_diag['imbalanced_features_after']} features still "
+                "have |SMD| > 0.10 after matching."
+            )
+        else:
+            st.success(
+                "All encoded features have |SMD| <= 0.10 after matching."
+            )
+
+        balance_table = (
+            psm_diag["balance_table"]
+            .sort_values("abs_smd_after", ascending=False)
+            .head(15)
+        )
+
+        st.dataframe(
+            balance_table[
+                [
+                    "feature",
+                    "smd_before",
+                    "smd_after",
+                    "abs_smd_after",
+                ]
+            ].round(3),
+            use_container_width=True,
+        )
 
     fig_dist = px.histogram(
         base_results,
