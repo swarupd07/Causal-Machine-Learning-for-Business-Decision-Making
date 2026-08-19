@@ -1,202 +1,355 @@
-"""
-app.py
-------
-Streamlit dashboard for the causal ML coupon project.
-"""
+"""Streamlit dashboard for held-out causal coupon targeting."""
 
-import streamlit as st
 import pandas as pd
 import plotly.express as px
+import streamlit as st
 
-from data_prep import load_and_prepare
-from causal_model import (
-    train_baseline_model,
-    train_uplift_model,
-    predict_uplift,
-    propensity_score_ate,
-    business_recommendation,
-    portfolio_summary,
+from backend import (
+    apply_targeting,
+    build_results_df,
+    filter_results,
+    get_causal_diagnostics,
+    get_data,
+    get_portfolio_summary,
+    get_recommended_csv_bytes,
+    prepare_holdout,
+    run_whatif,
 )
+from causal_model import (
+    bootstrap_causal_estimates,
+    coupon_expiration_overlap,
+    qini_curve,
+    subgroup_uplift,
+    treatment_balance,
+)
+
 
 st.set_page_config(page_title="Causal Coupon Targeting", layout="wide")
 st.title("Causal ML for Coupon Targeting")
 st.caption(
-    "Business question: which customers should receive the BETTER coupon "
-    "(1-day redemption window) instead of the weaker one (2-hour window), "
-    "based on the estimated CAUSAL effect on purchase - not just who is "
-    "predicted to buy anyway?"
+    "Which customers should receive a 1-day coupon instead of a 2-hour coupon? "
+    "Every reported causal estimate and targeting result below is computed on "
+    "a held-out evaluation set, not the rows used to train the models."
 )
 
 
 @st.cache_data
-def get_data():
-    return load_and_prepare()
+def load_cached_data():
+    return get_data()
 
 
 @st.cache_resource
-def get_models(X, T, Y):
-    baseline = train_baseline_model(X, Y)
-    model_t, model_c = train_uplift_model(X, T, Y)
-    return baseline, model_t, model_c
+def fit_cached_holdout(df_clean, X, T, Y):
+    return prepare_holdout(df_clean, X, T, Y, test_size=0.25, seed=42)
 
 
-df_clean, X, T, Y = get_data()
-baseline_model, model_treated, model_control = get_models(X, T, Y)
-p1, p0, uplift = predict_uplift(model_treated, model_control, X)
+@st.cache_data(show_spinner=False)
+def get_cached_bootstrap_cis(X_train, T_train, Y_train, X_eval, T_eval, Y_eval):
+    return bootstrap_causal_estimates(
+        X_train,
+        T_train,
+        Y_train,
+        X_eval,
+        T_eval,
+        Y_eval,
+        n_boot=100,
+        seed=42,
+        bootstrap_trees=50,
+    )
 
-# --- Sidebar: business assumptions + filters ------------------------------
+
+df_clean, X, T, Y, feature_encoder = load_cached_data()
+bundle = fit_cached_holdout(df_clean, X, T, Y)
+diagnostics = get_causal_diagnostics(bundle)
+
+with st.spinner("Computing cached, stratified bootstrap confidence intervals..."):
+    confidence_intervals = get_cached_bootstrap_cis(
+        bundle["X_train"],
+        bundle["T_train"],
+        bundle["Y_train"],
+        bundle["X_eval"],
+        bundle["T_eval"],
+        bundle["Y_eval"],
+    )
+
+
 st.sidebar.header("Business assumptions")
-avg_purchase_value = st.sidebar.slider("Average purchase value ($)", 5.0, 50.0, 15.0, 1.0)
-coupon_cost = st.sidebar.slider("Cost of sending the better coupon ($)", 0.5, 10.0, 2.0, 0.5)
+avg_purchase_value = st.sidebar.slider(
+    "Average purchase value ($)", 5.0, 50.0, 15.0, 1.0
+)
+coupon_cost = st.sidebar.slider(
+    "Cost of sending the better coupon ($)", 0.5, 10.0, 2.0, 0.5
+)
+targeting_strategy = st.sidebar.radio(
+    "Targeting rule", ["Value threshold", "Budget cap"]
+)
 
-st.sidebar.header("Filter customers")
-coupon_options = sorted(df_clean["coupon"].unique())
-destination_options = sorted(df_clean["destination"].unique())
-income_options = sorted(df_clean["income"].unique())
-
-selected_coupons = st.sidebar.multiselect("Coupon type", coupon_options, default=coupon_options)
-selected_destinations = st.sidebar.multiselect("Destination", destination_options, default=destination_options)
-selected_incomes = st.sidebar.multiselect("Income bracket", income_options, default=income_options)
-
-biz = business_recommendation(uplift, avg_purchase_value, coupon_cost)
-
-results_df = pd.DataFrame({
-    "coupon_type": df_clean["coupon"],
-    "destination": df_clean["destination"],
-    "income": df_clean["income"],
-    "p_purchase_weak_coupon": p0.round(3),
-    "p_purchase_better_coupon": p1.round(3),
-    "uplift": uplift.round(3),
-    "expected_incremental_revenue": biz["expected_incremental_revenue"].round(2),
-    "recommend_better_coupon": biz["recommend"],
-})
-
-# Apply sidebar filters
-filtered_df = results_df[
-    results_df["coupon_type"].isin(selected_coupons)
-    & results_df["destination"].isin(selected_destinations)
-    & results_df["income"].isin(selected_incomes)
-]
-
-summary = portfolio_summary(
-    business_recommendation(filtered_df["uplift"].values, avg_purchase_value, coupon_cost),
+base_results = build_results_df(
+    bundle["df_eval"],
+    bundle["p0"],
+    bundle["p1"],
+    bundle["uplift"],
+    avg_purchase_value,
     coupon_cost,
 )
 
-tab_overview, tab_top, tab_lookup = st.tabs(["Overview", "Top Customers", "Customer Lookup"])
+st.sidebar.header("Filter held-out customers")
+coupon_options = sorted(base_results["coupon_type"].unique())
+destination_options = sorted(base_results["destination"].unique())
+income_options = sorted(base_results["income"].unique())
+selected_coupons = st.sidebar.multiselect(
+    "Coupon type", coupon_options, default=coupon_options
+)
+selected_destinations = st.sidebar.multiselect(
+    "Destination", destination_options, default=destination_options
+)
+selected_incomes = st.sidebar.multiselect(
+    "Income bracket", income_options, default=income_options
+)
 
-# ---------------------------------------------------------------------
-# TAB 1: Overview
-# ---------------------------------------------------------------------
+filtered_df = filter_results(
+    base_results, selected_coupons, selected_destinations, selected_incomes
+)
+budget = None
+if targeting_strategy == "Budget cap":
+    max_budget = max(coupon_cost, float(len(filtered_df) * coupon_cost))
+    budget = st.sidebar.number_input(
+        "Campaign budget ($)",
+        min_value=0.0,
+        max_value=max_budget,
+        value=min(1000.0, max_budget),
+        step=float(coupon_cost),
+    )
+
+targeted_df = apply_targeting(
+    filtered_df,
+    avg_purchase_value,
+    coupon_cost,
+    strategy=targeting_strategy,
+    budget=budget,
+)
+summary = get_portfolio_summary(targeted_df, coupon_cost)
+
+
+tab_overview, tab_top, tab_lookup = st.tabs(
+    ["Overview & Diagnostics", "Top Customers", "Customer Lookup"]
+)
+
 with tab_overview:
-    st.caption(f"Showing results for {len(filtered_df):,} customers matching your sidebar filters.")
-
+    st.caption(
+        f"Showing {len(targeted_df):,} filtered customers from a "
+        f"{len(bundle['X_eval']):,}-row held-out evaluation set."
+    )
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Customers to target", f"{summary['customers_targeted']:,}")
-    col2.metric("Total incremental revenue", f"${summary['total_incremental_revenue']:,.0f}")
-    col3.metric("Total campaign cost", f"${summary['total_cost']:,.0f}")
+    col2.metric(
+        "Incremental revenue", f"${summary['total_incremental_revenue']:,.0f}"
+    )
+    col3.metric("Campaign cost", f"${summary['total_cost']:,.0f}")
     col4.metric("Campaign ROI", f"{summary['roi'] * 100:,.1f}%")
 
     st.divider()
-
-    st.subheader("Why causal targeting beats plain prediction")
-    st.write(
-        "The baseline model only predicts *who buys*, so it would rank "
-        "already-loyal customers highest even if a coupon wouldn't change "
-        "their behavior at all. The uplift model instead ranks customers by "
-        "how much MORE likely a coupon makes them to buy."
+    st.subheader("Held-out causal estimates")
+    m1, m2, m3 = st.columns(3)
+    t_ci = confidence_intervals["t_learner"]
+    psm_ci = confidence_intervals["psm"]
+    aipw_ci = confidence_intervals["aipw"]
+    m1.metric(
+        "T-learner average uplift",
+        f"{diagnostics['avg_uplift']:+.3f}",
+        f"95% CI [{t_ci[0]:+.3f}, {t_ci[1]:+.3f}]",
     )
-
-    ate_psm = propensity_score_ate(X, T, Y)
-    avg_uplift = uplift.mean()
-    m1, m2 = st.columns(2)
-    m1.metric("Average uplift (T-learner)", f"{avg_uplift:+.3f}")
-    m2.metric("Average effect (Propensity Score Matching cross-check)", f"{ate_psm:+.3f}")
+    m2.metric(
+        "Propensity matching ATT",
+        f"{diagnostics['ate_psm']:+.3f}",
+        f"95% CI [{psm_ci[0]:+.3f}, {psm_ci[1]:+.3f}]",
+    )
+    m3.metric(
+        "Doubly-robust AIPW ATE",
+        f"{diagnostics['ate_aipw']:+.3f}",
+        f"95% CI [{aipw_ci[0]:+.3f}, {aipw_ci[1]:+.3f}]",
+    )
     st.caption(
-        "These two independent methods should roughly agree - that agreement "
-        "is a sanity check that the causal estimate is trustworthy."
+        "The estimators use different assumptions. Agreement is reassuring, "
+        "but it does not by itself prove that all confounding has been removed."
     )
+
+    with st.expander("Positivity, overlap, and treatment-balance checks", expanded=True):
+        balance = treatment_balance(T)
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Control share (2h)", f"{balance['control_share']:.1%}")
+        b2.metric("Treated share (1d)", f"{balance['treated_share']:.1%}")
+        b3.metric(
+            "Propensities clipped",
+            f"{diagnostics['propensity']['n_clipped']:,} "
+            f"({diagnostics['propensity']['fraction_clipped']:.1%})",
+        )
+
+        overlap_table, overlap_flags = coupon_expiration_overlap(df_clean)
+        flagged = overlap_flags[overlap_flags["flag_over_90pct"]]
+        if len(flagged):
+            names = ", ".join(flagged["coupon"].astype(str))
+            st.warning(
+                "Potential positivity concern: these coupon types exceed 90% in "
+                f"one expiration arm: {names}. Interpret or target them separately."
+            )
+        else:
+            st.success(
+                "No coupon type exceeds 90% concentration in a single expiration arm."
+            )
+        if diagnostics["propensity"]["n_clipped"]:
+            st.warning(
+                "Some held-out rows reached the 0.01/0.99 propensity clipping "
+                "bounds and therefore have weak empirical counterfactual support."
+            )
+
+        overlap_long = (
+            overlap_table.reset_index()
+            .melt(id_vars="coupon", var_name="expiration", value_name="share")
+        )
+        fig_overlap = px.bar(
+            overlap_long,
+            x="coupon",
+            y="share",
+            color="expiration",
+            barmode="group",
+            title="Expiration mix within each coupon type",
+            labels={"share": "Within-coupon share"},
+        )
+        fig_overlap.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_overlap, use_container_width=True)
 
     fig_dist = px.histogram(
-        results_df, x="uplift", nbins=40,
-        title="Distribution of estimated uplift across all customers",
-        labels={"uplift": "Estimated uplift (causal effect)"},
+        base_results,
+        x="uplift",
+        nbins=40,
+        title="Held-out distribution of estimated individual uplift",
+        labels={"uplift": "Estimated causal uplift"},
     )
     st.plotly_chart(fig_dist, use_container_width=True)
 
-# ---------------------------------------------------------------------
-# TAB 2: Top Customers
-# ---------------------------------------------------------------------
+    raw_ps = bundle["propensity_model"].predict_proba(bundle["X_eval"])[:, 1]
+    qini = qini_curve(
+        bundle["Y_eval"], bundle["T_eval"], bundle["uplift"], raw_ps
+    ).melt(
+        id_vars="fraction_targeted",
+        value_vars=["model_gain", "random_gain"],
+        var_name="ranking",
+        value_name="cumulative_gain",
+    )
+    fig_qini = px.line(
+        qini,
+        x="fraction_targeted",
+        y="cumulative_gain",
+        color="ranking",
+        title="Held-out uplift/Qini-style cumulative gain",
+        labels={
+            "fraction_targeted": "Fraction targeted",
+            "cumulative_gain": "IPW cumulative incremental response",
+        },
+    )
+    fig_qini.update_xaxes(tickformat=".0%")
+    st.plotly_chart(fig_qini, use_container_width=True)
+
+    subgroup = subgroup_uplift(base_results, "coupon_type")
+    fig_subgroup = px.bar(
+        subgroup,
+        x="coupon_type",
+        y="mean_uplift",
+        hover_data=["customers"],
+        title="Held-out average uplift by coupon type",
+        labels={"mean_uplift": "Average estimated uplift"},
+    )
+    st.plotly_chart(fig_subgroup, use_container_width=True)
+
+
 with tab_top:
-    st.subheader("Customers ranked by estimated uplift")
-    n_show = st.slider("How many customers to show", 5, 50, 15, 5)
-    top_customers = filtered_df.sort_values("uplift", ascending=False).head(n_show)
-
-    fig_bar = px.bar(
-        top_customers.reset_index(),
-        x="index", y="uplift", color="recommend_better_coupon",
-        hover_data=["coupon_type", "destination", "income", "expected_incremental_revenue"],
-        labels={"index": "Customer row", "uplift": "Estimated uplift"},
-        title=f"Top {n_show} customers by uplift",
-    )
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-    st.dataframe(top_customers, use_container_width=True)
-
-    csv_bytes = filtered_df[filtered_df["recommend_better_coupon"]].to_csv(index=True).encode("utf-8")
-    st.download_button(
-        "Download recommended customers (CSV)",
-        data=csv_bytes,
-        file_name="recommended_customers.csv",
-        mime="text/csv",
-    )
-
-# ---------------------------------------------------------------------
-# TAB 3: Customer Lookup (with live what-if sliders)
-# ---------------------------------------------------------------------
-with tab_lookup:
-    st.subheader("Look up a single customer")
-
-    if len(filtered_df) == 0:
+    st.subheader("Customers ranked by held-out estimated uplift")
+    if targeted_df.empty:
         st.warning("No customers match the current sidebar filters.")
     else:
-        options = filtered_df.index.tolist()
-        row_id = st.selectbox(
-            "Choose a customer (row number - coupon type)",
-            options,
-            format_func=lambda i: f"Row {i} - {results_df.loc[i, 'coupon_type']}",
+        n_show = st.slider("How many customers to show", 5, 50, 15, 5)
+        top_customers = targeted_df.sort_values("uplift", ascending=False).head(n_show)
+        fig_bar = px.bar(
+            top_customers,
+            x="original_row",
+            y="uplift",
+            color="recommend_better_coupon",
+            hover_data=[
+                "coupon_type",
+                "destination",
+                "income",
+                "expected_incremental_revenue",
+                "net_value",
+            ],
+            title=f"Top {min(n_show, len(top_customers))} customers by uplift",
         )
-        row = results_df.loc[row_id]
+        st.plotly_chart(fig_bar, use_container_width=True)
+        st.dataframe(targeted_df.round(3), use_container_width=True)
+        st.download_button(
+            "Download recommended customers (CSV)",
+            data=get_recommended_csv_bytes(targeted_df),
+            file_name="recommended_customers.csv",
+            mime="text/csv",
+        )
 
+
+with tab_lookup:
+    st.subheader("Look up a held-out customer")
+    if targeted_df.empty:
+        st.warning("No customers match the current sidebar filters.")
+    else:
+        options = targeted_df.index.tolist()
+        row_id = st.selectbox(
+            "Choose a customer",
+            options,
+            format_func=lambda i: (
+                f"Original row {int(base_results.loc[i, 'original_row'])} - "
+                f"{base_results.loc[i, 'coupon_type']}"
+            ),
+        )
+        row = targeted_df.loc[row_id]
         c1, c2, c3 = st.columns(3)
-        c1.metric("P(purchase) - weak coupon", f"{row['p_purchase_weak_coupon']:.2f}")
-        c2.metric("P(purchase) - better coupon", f"{row['p_purchase_better_coupon']:.2f}")
+        c1.metric(
+            "P(purchase) - 2h coupon", f"{row['p_purchase_weak_coupon']:.2f}"
+        )
+        c2.metric(
+            "P(purchase) - 1d coupon", f"{row['p_purchase_better_coupon']:.2f}"
+        )
         c3.metric("Estimated uplift", f"{row['uplift']:+.2f}")
 
         if row["recommend_better_coupon"]:
             st.success(
-                f"Recommendation: SEND the better coupon. Expected incremental "
-                f"revenue ${row['expected_incremental_revenue']:.2f} exceeds the "
-                f"${coupon_cost:.2f} cost."
+                "Recommendation: send the 1-day coupon under the selected "
+                f"{targeting_strategy.lower()} rule."
             )
+        elif row["net_value"] <= 0:
+            st.warning("Do not upgrade: expected incremental value does not cover cost.")
         else:
-            st.warning(
-                "Recommendation: DO NOT upgrade this coupon - the expected "
-                "incremental revenue does not cover the cost."
-            )
+            st.info("Profitable estimate, but this customer falls outside the budget cap.")
 
         st.divider()
         st.subheader("What-if: change this customer's age or income")
-        st.caption("Move the sliders to see how the estimated uplift changes in real time.")
-
         w1, w2 = st.columns(2)
-        what_if_age = w1.slider("Age", 18, 60, int(X.loc[row_id, "age"]))
-        what_if_income = w2.slider("Income level (1=lowest, 9=highest)", 1, 9, int(X.loc[row_id, "income"]))
-
-        X_whatif = X.loc[[row_id]].copy()
-        X_whatif["age"] = what_if_age
-        X_whatif["income"] = what_if_income
-
-        p1_whatif, p0_whatif, uplift_whatif = predict_uplift(model_treated, model_control, X_whatif)
-        st.metric("What-if estimated uplift", f"{uplift_whatif[0]:+.2f}",
-                   delta=f"{(uplift_whatif[0] - row['uplift']):+.2f} vs. original")
+        what_if_age = w1.slider(
+            "Age", 18, 60, int(bundle["X_eval"].loc[row_id, "age"])
+        )
+        what_if_income = w2.slider(
+            "Income level (1=lowest, 9=highest)",
+            1,
+            9,
+            int(bundle["X_eval"].loc[row_id, "income"]),
+        )
+        _, _, uplift_whatif = run_whatif(
+            bundle["model_treated"],
+            bundle["model_control"],
+            bundle["X_eval"],
+            row_id,
+            what_if_age,
+            what_if_income,
+        )
+        st.metric(
+            "What-if estimated uplift",
+            f"{uplift_whatif[0]:+.2f}",
+            delta=f"{(uplift_whatif[0] - row['uplift']):+.2f} vs. original",
+        )
