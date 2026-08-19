@@ -1,4 +1,4 @@
-"""Reusable orchestration helpers for the Streamlit dashboard."""
+# Reusable orchestration helpers for the Streamlit dashboard
 
 from __future__ import annotations
 
@@ -15,41 +15,69 @@ from causal_model import (
     train_baseline_model,
     train_uplift_model,
 )
-from data_prep import load_and_prepare
+from data_prep import (
+    fit_feature_encoder,
+    load_and_prepare,
+    transform_causal_features,
+)
 
 
 def get_data():
     return load_and_prepare()
 
 
-def prepare_holdout(df_clean, X, T, Y, test_size=0.25, seed=42):
-    # Fit nuisance models on train rows and return a held-out evaluation bundlee
+def prepare_holdout(df_clean, T, Y, test_size=0.25, seed=42):
     train_idx, eval_idx = causal_train_test_split(
-        X, T, Y, test_size=test_size, seed=seed
+        T, Y, test_size=test_size, seed=seed
     )
-    X_train = X.iloc[train_idx].reset_index(drop=True)
+
+    # Split raw rows before fitting the encoder
+    df_train = df_clean.iloc[train_idx].reset_index(drop=True)
+    df_eval = (
+        df_clean.iloc[eval_idx]
+        .copy()
+        .reset_index(names="original_row")
+    )
+
     T_train = T.iloc[train_idx].reset_index(drop=True)
     Y_train = Y.iloc[train_idx].reset_index(drop=True)
-    X_eval = X.iloc[eval_idx].reset_index(drop=True)
     T_eval = T.iloc[eval_idx].reset_index(drop=True)
     Y_eval = Y.iloc[eval_idx].reset_index(drop=True)
-    df_eval = df_clean.iloc[eval_idx].copy().reset_index(names="original_row")
 
-    baseline = train_baseline_model(X_train, Y_train, X_eval, Y_eval)
-    model_t, model_c = train_uplift_model(X_train, T_train, Y_train)
+    # Learn categorical schema from training data only
+    encoder = fit_feature_encoder(df_train)
+
+    X_train = transform_causal_features(
+        df_train, encoder
+    ).reset_index(drop=True)
+
+    X_eval = transform_causal_features(
+        df_eval, encoder
+    ).reset_index(drop=True)
+
+    baseline = train_baseline_model(
+        X_train, Y_train, X_eval, Y_eval
+    )
+    model_t, model_c = train_uplift_model(
+        X_train, T_train, Y_train
+    )
     propensity_model = fit_propensity_model(X_train, T_train)
-    p1, p0, uplift = predict_uplift(model_t, model_c, X_eval)
+    p1, p0, uplift = predict_uplift(
+        model_t, model_c, X_eval
+    )
 
     return {
         "train_idx": train_idx,
         "eval_idx": eval_idx,
+        "df_train": df_train,
+        "df_eval": df_eval,
         "X_train": X_train,
         "T_train": T_train,
         "Y_train": Y_train,
         "X_eval": X_eval,
         "T_eval": T_eval,
         "Y_eval": Y_eval,
-        "df_eval": df_eval,
+        "encoder": encoder,
         "baseline": baseline,
         "model_treated": model_t,
         "model_control": model_c,
@@ -120,20 +148,21 @@ def get_portfolio_summary(targeted_df, coupon_cost):
 def get_causal_diagnostics(bundle):
     # Compute held-out T-learner, PSM, and doubly-robust AIPW estimates
     ate_psm, ps_diagnostics = propensity_score_ate(
-        bundle["X_eval"],
-        bundle["T_eval"],
-        bundle["Y_eval"],
-        bundle["propensity_model"],
-        return_diagnostics=True,
-    )
+    bundle["X_eval"],
+    bundle["T_eval"],
+    bundle["Y_eval"],
+    bundle["propensity_model"],
+    caliper=0.20,
+    return_diagnostics=True,)
+
     ate_aipw = aipw_ate(
         bundle["X_eval"],
         bundle["T_eval"],
         bundle["Y_eval"],
         bundle["model_treated"],
         bundle["model_control"],
-        bundle["propensity_model"],
-    )
+        bundle["propensity_model"],)
+    
     return {
         "avg_uplift": float(bundle["uplift"].mean()),
         "ate_psm": ate_psm,
