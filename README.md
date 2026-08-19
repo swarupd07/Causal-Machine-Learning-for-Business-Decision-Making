@@ -39,7 +39,7 @@ This project instead estimates the **causal treatment effect** of the coupon upg
 - **📉 Qini-style gain curve** — an inverse-propensity-weighted cumulative gain curve comparing model-ranked targeting against random targeting.
 - **🗂️ Subgroup uplift** — average estimated uplift broken out by coupon type, to see where the causal effect is strongest.
 - **🖥️ Interactive dashboard** — filter by coupon type, destination, and income; explore top-uplift customers; adjust business assumptions (purchase value, coupon cost, targeting rule, budget) live; and run "what-if" simulations on individual customers' age/income.
-- **🧱 Inference-safe encoding** — a persisted `OneHotEncoder(handle_unknown="ignore")` fit only on training data, so unseen categories at evaluation/inference time are handled explicitly instead of silently breaking column alignment.
+- **🧱 Inference-safe encoding** — training-fitted `OneHotEncoder(handle_unknown="ignore")` fit only on training data, so unseen categories at evaluation/inference time are handled explicitly instead of silently breaking column alignment.
 
 ---
 
