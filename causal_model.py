@@ -9,7 +9,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import NearestNeighbors
-
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 PROPENSITY_CLIP = (0.01, 0.99)
 
@@ -29,12 +30,28 @@ def causal_train_test_split(T, Y, test_size=0.25, seed=42):
 
 
 def train_baseline_model(X_train, Y_train, X_eval=None, Y_eval=None):
-    # Fiting baseline model to predict purchase outcome without treatment information.
-    model = LogisticRegression(max_iter=2000, random_state=42)
+   # Training a scaled Logistic Regression purchase baseline
+
+    model = Pipeline(
+        steps=[
+            ("scaler", StandardScaler()),
+            (
+                "logistic_regression",
+                LogisticRegression(
+                    max_iter=2000,
+                    random_state=42,
+                ),
+            ),
+        ]
+    )
+
     model.fit(X_train, Y_train)
+
     if X_eval is not None and Y_eval is not None:
-        auc = roc_auc_score(Y_eval, model.predict_proba(X_eval)[:, 1])
+        probabilities = model.predict_proba(X_eval)[:, 1]
+        auc = roc_auc_score(Y_eval, probabilities)
         print(f"Held-out baseline purchase AUC: {auc:.3f}")
+
     return model
 
 
@@ -70,14 +87,28 @@ def _positive_probability(model, X):
 
 
 def predict_uplift(model_treated, model_control, X):
-    # Predict individual uplift by subtracting control from treated predicted probabilities.
+    # Predicting individual uplift by subtracting control from treated predicted probabilities.
     p1 = _positive_probability(model_treated, X)
     p0 = _positive_probability(model_control, X)
     return p1, p0, p1 - p0
 
 
 def fit_propensity_model(X, T):
-    model = LogisticRegression(max_iter=2000, random_state=42)
+    # Fiting Logistic Regression propensity model
+
+    model = Pipeline(
+        steps=[
+            ("scaler", StandardScaler()),
+            (
+                "logistic_regression",
+                LogisticRegression(
+                    max_iter=2000,
+                    random_state=42,
+                ),
+            ),
+        ]
+    )
+
     model.fit(X, T)
     return model
 
