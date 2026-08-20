@@ -391,7 +391,7 @@ def bootstrap_ate_T(X, T, Y, n_boot=100, seed=42):
 
 
 def business_recommendation(
-    uplift, avg_purchase_value=15.0, coupon_cost=2.0, budget=None
+    uplift, avg_purchase_value=20.0, coupon_cost=2.0, budget=None
 ):
     # Computing expected incremental revenue, net value, and whether to recommend coupon targeting
     uplift = np.asarray(uplift, dtype=float)
