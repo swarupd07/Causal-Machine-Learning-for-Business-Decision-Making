@@ -77,7 +77,7 @@ with st.spinner("Computing cached, stratified bootstrap confidence intervals..."
 
 st.sidebar.header("Business assumptions")
 avg_purchase_value = st.sidebar.slider(
-    "Average purchase value ($)", 5.0, 50.0, 15.0, 1.0
+    "Average purchase value ($)", 5.0, 50.0, 20.0, 1.0
 )
 coupon_cost = st.sidebar.slider(
     "Cost of sending the better coupon ($)", 0.5, 10.0, 2.0, 0.5
