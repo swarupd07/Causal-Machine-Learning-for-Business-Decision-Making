@@ -42,10 +42,10 @@ All numbers below come from the dashboard, computed **entirely on a held-out eva
 | Unmatched treated observations | 71 |
 | Maximum \|SMD\| before / after matching | 0.331 / 0.237 |
 | Features with post-match \|SMD\| > 0.10 | 11 |
-| Customers recommended (value-threshold rule, $15/$2 assumptions) | 1,832 |
-| Projected incremental revenue | $5,433 |
-| Projected campaign cost | $3,664 |
-| **Projected campaign ROI** | **48.3%** |
+| Customers recommended (value-threshold rule, $20/$2 assumptions) | 2,364 |
+| Projected incremental revenue | $8,485 |
+| Projected campaign cost | $4,728 |
+| **Projected campaign ROI** | **79.5%** |
 
 **All three causal estimators agree in direction and rough magnitude**, and each interval excludes zero — the strongest evidence this project can offer that the effect isn't just sampling noise. (It does not, on its own, rule out confounding — see [Limitations](#honest-limitations).)
 
