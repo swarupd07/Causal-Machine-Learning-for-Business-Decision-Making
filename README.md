@@ -1,7 +1,7 @@
 # 🎯 Causal ML for Coupon Targeting
 ### Held-out causal inference for business decision making
 
-A causal machine learning pipeline that answers a real targeting question — **not** "will this customer buy?", but **"will this customer buy *because* we gave them a better coupon?"** — using three independent, cross-validated causal estimators, evaluated entirely on a held-out set, and surfaced through an interactive Streamlit dashboard.
+A causal machine learning pipeline that answers a real targeting question — **not** "will this customer buy?", but **"will this customer buy *because* we gave them a better coupon?"** — using three held-out causal estimators, evaluated entirely on a held-out set, and surfaced through an interactive Streamlit dashboard.
 
 ---
 
@@ -18,7 +18,7 @@ A plain predictive model would rank customers by *purchase probability*, which o
 | 🎯 **Decide who should receive a coupon** | Every customer gets an individual causal effect estimate — not a purchase probability — used to drive the targeting decision |
 | 💰 **ROI** | Targeting is evaluated against a real cost-benefit rule, with both a value-threshold mode and a budget-capped mode |
 | 📈 **Incremental Revenue** | Measures the *extra* revenue the better coupon generates, not total revenue |
-| 🔬 **Treatment Effect** | Estimated three independent ways — T-learner, caliper-matched PSM, and doubly-robust AIPW — all reported with bootstrap confidence intervals |
+| 🔬 **Treatment Effect** | Estimated three ways — T-learner, caliper-matched PSM, and doubly-robust AIPW — all reported with bootstrap confidence intervals |
 | 📊 **Statistics + Decision Science + ML** | Combines logistic regression, random forests, propensity-score matching, covariate balance diagnostics, and ROI decision rules |
 | 🧠 **Causal Inference** | Explicit treatment/control split, confounder adjustment, positivity/overlap checks, and covariate balance testing — not just correlation |
 | 🏢 **Business Optimization** | Outputs a targeting list, campaign ROI, and a Qini-style gain curve — the same diagnostics used in real uplift-marketing teams |
@@ -33,11 +33,15 @@ All numbers below come from the dashboard, computed **entirely on a held-out eva
 |---|---|
 | Held-out evaluation set size | 3,153 customers |
 | **T-learner** average uplift | **+0.148**, 95% CI [+0.129, +0.159] |
-| **Propensity-matching ATT** (0.20 SD caliper) | **+0.194**, 95% CI [+0.117, +0.230] |
-| **Doubly-robust AIPW** ATE | **+0.169**, 95% CI [+0.131, +0.199] |
+| **Propensity-matching ATT** (0.20 SD caliper) | **+0.171**, 95% CI [+0.120, +0.229] |
+| **Doubly-robust AIPW** ATE | **+0.170**, 95% CI [+0.132, +0.200] |
 | Treated / control split (held-out) | 55.8% (1-day) / 44.2% (2-hour) |
-| Propensity scores requiring clipping | 0 (0.0%) — no extreme scores |
+| Propensity scores requiring clipping | 1 (0.03%; displayed as 0.0%) |
 | Coupon types exceeding 90% concentration in one expiration arm | None — no severe positivity violation detected |
+| PSM match rate | 96.0% |
+| Unmatched treated observations | 71 |
+| Maximum \|SMD\| before / after matching | 0.331 / 0.237 |
+| Features with post-match \|SMD\| > 0.10 | 11 |
 | Customers recommended (value-threshold rule, $15/$2 assumptions) | 1,832 |
 | Projected incremental revenue | $5,433 |
 | Projected campaign cost | $3,664 |
@@ -52,9 +56,9 @@ All numbers below come from the dashboard, computed **entirely on a held-out eva
 ## Methodology
 
 ### 1. Held-out evaluation (not in-sample)
-The data is split **once**, up front, into a 75% training set and a 25% evaluation set, stratified jointly on treatment × outcome to preserve both the treated/control ratio and the acceptance rate in both splits (`causal_train_test_split`). **Every causal estimate, every diagnostic, and every dashboard number is computed on the held-out 25%** — the models never see these rows during training. The categorical feature encoder is also **fit only on the training split** and then applied to the evaluation split, preventing category-leakage from evaluation rows influencing the feature schema.
+The data is split **once**, up front, into a 75% training set and a 25% evaluation set, stratified jointly on treatment × outcome to preserve both the treated/control ratio and the acceptance rate in both splits (`causal_train_test_split`). **Every causal estimate, every diagnostic, and every dashboard number is computed on the held-out 25%** — the models never see these rows during training. The categorical feature encoder is also **fit only on the training split** and then applied to the evaluation split, preventing category-leakage from evaluation rows influencing the feature schema. The logistic-regression baseline and propensity models use `StandardScaler` → `LogisticRegression` pipelines fitted only on training data.
 
-### 2. Three independent causal estimators
+### 2. Three causal estimators
 
 - **T-learner** — two separate `RandomForestClassifier`s (`min_samples_leaf=10`, trained in parallel via `n_jobs=-1`), one fit on treated training rows, one on control training rows. Individual uplift = difference in their held-out predictions.
 - **Propensity-Score Matching (ATT)** — a logistic regression propensity model, followed by 1-nearest-neighbor matching **on the logit propensity score**, restricted by a **0.20 standard-deviation caliper**: treated customers without an acceptably close control match are excluded rather than force-matched to a poor counterfactual. Reports the **Average Treatment effect on the Treated**, since matching only estimates effects for treated units with usable matches.
@@ -65,7 +69,7 @@ Beyond just matching, the pipeline computes **standardized mean differences (SMD
 
 ### 4. Positivity & overlap checks
 - `coupon_expiration_overlap` cross-tabulates coupon type against expiration window and flags any coupon type where one expiration arm exceeds 90% share — a proxy for a positivity violation.
-- Propensity scores are clipped to `[0.01, 0.99]`, and the fraction of held-out rows actually requiring clipping is reported directly on the dashboard (0.0% in the current run — a good sign).
+- Propensity scores are clipped to `[0.01, 0.99]`, and the fraction of held-out rows actually requiring clipping is reported directly on the dashboard (1 of 3,153 rows, or 0.03%, in the current run).
 
 ### 5. Arm-stratified bootstrap confidence intervals
 Instead of a plain bootstrap, each resample draws **separately, with replacement, from the treated and control arms** (`_stratified_bootstrap_indices`), preserving the treatment split in every resample. All three estimators (T-learner, PSM, AIPW) are recomputed on 100 such resamples (with a reduced 50-tree forest per resample for tractability), and the 2.5th/97.5th percentiles form each 95% CI. Both the bootstrap and the main model fits are wrapped in Streamlit caching (`@st.cache_data`/`@st.cache_resource`) so they run once per session, not on every UI interaction.
@@ -106,8 +110,7 @@ causal-ml-coupon-targeting/
 ├── requirements.txt                        # Pinned dependencies
 ├── EDA.ipynb                               # Exploratory analysis notebook (missingness, duplicates, expiration/coupon distributions)
 ├── in-vehicle-coupon-recommendation.csv    # Local backup of the dataset (used if the UCI URL is unreachable)
-└── results/
-    └── Causal_Coupon_Targeting.pdf         # Exported dashboard screenshots showing the real held-out results above
+└── Causal Coupon Targeting1.pdf            # Exported dashboard screenshots showing the real held-out results above
 ```
 
 ## How to Run
@@ -146,6 +149,7 @@ The app downloads the dataset automatically (falling back to the local CSV backu
 - This is **observational data** — the redemption window was not randomly assigned, so all causal claims rest on the **ignorability assumption** (no unmeasured confounding), which no amount of diagnostics can fully verify.
 - Confidence intervals reflect **sampling variability**, not the risk of confounding bias — a tight interval means the estimate is precise, not that it's unbiased.
 - The overlap check flags severe (>90%) positivity violations by coupon type, but does not rule out subtler imbalance across combinations of features.
+- Caliper matching improved balance but did not achieve complete covariate balance: 11 encoded features retained |SMD| > 0.10, with maximum post-match |SMD| = 0.237. Therefore, the PSM ATT should be interpreted cautiously.
 - `avg_purchase_value` and `coupon_cost` are illustrative, adjustable assumptions, not measured business data — the ROI/revenue figures move accordingly and do not currently carry their own confidence interval.
 
 ## Why This Project Stands Out
