@@ -162,9 +162,6 @@ The app downloads the dataset automatically (falling back to the local CSV backu
 | One point estimate | Three independent estimators, each with a bootstrap CI |
 | Correlation | Causal inference, with explicit positivity and covariate-balance diagnostics |
 
-## Resume-Ready Description
-
-> **Causal ML for Coupon Targeting:** Built a held-out causal inference pipeline estimating individual and average treatment effects via a T-learner, caliper-matched Propensity Score Matching (with covariate balance diagnostics), and a doubly-robust AIPW estimator, each validated with arm-stratified bootstrap confidence intervals. Translated results into ROI-based, budget-constrained targeting recommendations and Qini-curve-validated customer rankings, delivered through an interactive Streamlit dashboard.
 
 ## Possible Extensions
 
